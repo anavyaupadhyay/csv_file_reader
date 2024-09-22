@@ -6,34 +6,40 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 
+from .utils import generate_csv
 from .tasks import process_images
 from .models import ProductImage
 
 class CheckStatusView(APIView):
     def get(self, request, request_id, *args, **kwargs):
-        # Check processing status
+        # Get images for the request_id
         images = ProductImage.objects.filter(request_id=request_id)
+        
         if not images.exists():
             return Response({'error': 'Invalid request ID'}, status=status.HTTP_404_NOT_FOUND)
 
+        # Check if there are any images still in 'pending' state
         pending_images = images.filter(processing_status='pending')
         if pending_images.exists():
             return Response({'status': 'in_process'})
+        
+        # Check if any images have failed
+        failed_images = images.filter(processing_status='failed')
+        if failed_images.exists():
+            errors = list(failed_images.values('image_url', 'error_message'))
+        else:
+            errors = []
 
-        # If all images are processed
         processed_images = images.filter(processing_status='completed')
-        df = pd.DataFrame(list(processed_images.values('product__name', 'image_url', 'processed_image_url')))
+        if failed_images.exists() and not processed_images.exists(): # Means all the images are failed to processed
+            return Response({'status': 'failed', 'errors': list(failed_images.values('image_url', 'error_message'))})
+        
+        # images are processed, so prepare the response with processed data
+        response = generate_csv(processed_images)
 
-        if df.empty:
-            return Response({'status': 'completed', 'data': []})
+        return Response({'status': 'completed', 'data': response, 'errors': list(failed_images.values('image_url', 'error_message')) })
 
-        csv_file = StringIO()
-        df.to_csv(csv_file, index=False)
-        response = HttpResponse(csv_file.getvalue(), content_type='text/csv')
-        response['Content-Disposition'] = f'attachment; filename={request_id}.csv'
 
-        return Response({'status': 'completed', 'data': response})
-    
 class UploadCSVView(APIView):
     def post(self, request, *args, **kwargs):
         if 'file' not in request.FILES:
@@ -60,10 +66,5 @@ class UploadCSVView(APIView):
 class WebhookTriggerView(APIView):
     def post(self, request, *args, **kwargs):
         # Logic to create and send the CSV file
-        df = pd.DataFrame(list(ProductImage.objects.values('product__name', 'image_url', 'processed_image_url')))
-        csv_file = StringIO()
-        df.to_csv(csv_file, index=False)
-        response = HttpResponse(csv_file.getvalue(), content_type='text/csv')
-        response['Content-Disposition'] = 'attachment; filename=processed_images.csv'
-        
+        response = generate_csv(ProductImage.objects.filter(status="completed"))
         return response
